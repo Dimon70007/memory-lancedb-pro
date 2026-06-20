@@ -1073,7 +1073,7 @@ export class MemoryStore {
         for (const row of legacyRows) {
           const originalRow = {
             ...row,
-            vector: Array.from(row.vector as Iterable<number>),
+            vector: Array.from((row.vector || []) as Iterable<number>),
             scope: (row.scope as string | undefined) ?? "global",
             metadata: (row.metadata as string | undefined) || "{}",
           };
@@ -1663,7 +1663,7 @@ export class MemoryStore {
     return {
       id: row.id as string,
       text: row.text as string,
-      vector: Array.from(row.vector as Iterable<number>),
+      vector: Array.from((row.vector || []) as Iterable<number>),
       category: row.category as MemoryEntry["category"],
       scope: rowScope,
       importance: clampImportance(Number(row.importance)),
@@ -2246,7 +2246,7 @@ export class MemoryStore {
           const original: MemoryEntry = {
             id: row.id as string,
             text: row.text as string,
-            vector: Array.from(row.vector as Iterable<number>),
+            vector: Array.from((row.vector || []) as Iterable<number>),
             category: row.category as MemoryEntry["category"],
             scope: rowScope,
             importance: Number(row.importance),
@@ -2433,7 +2433,7 @@ export class MemoryStore {
       const original: MemoryEntry = {
         id: row.id as string,
         text: row.text as string,
-        vector: Array.from(row.vector as Iterable<number>),
+        vector: Array.from((row.vector || []) as Iterable<number>),
         category: row.category as MemoryEntry["category"],
         scope: rowScope,
         importance: clampImportance(Number(row.importance)),

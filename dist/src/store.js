@@ -873,7 +873,7 @@ export class MemoryStore {
                 for (const row of legacyRows) {
                     const originalRow = {
                         ...row,
-                        vector: Array.from(row.vector),
+                        vector: Array.from((row.vector || [])),
                         scope: row.scope ?? "global",
                         metadata: row.metadata || "{}",
                     };
@@ -1397,7 +1397,7 @@ export class MemoryStore {
         return {
             id: row.id,
             text: row.text,
-            vector: Array.from(row.vector),
+            vector: Array.from((row.vector || [])),
             category: row.category,
             scope: rowScope,
             importance: clampImportance(Number(row.importance)),
@@ -1856,7 +1856,7 @@ export class MemoryStore {
                     const original = {
                         id: row.id,
                         text: row.text,
-                        vector: Array.from(row.vector),
+                        vector: Array.from((row.vector || [])),
                         category: row.category,
                         scope: rowScope,
                         importance: Number(row.importance),
@@ -2013,7 +2013,7 @@ export class MemoryStore {
             const original = {
                 id: row.id,
                 text: row.text,
-                vector: Array.from(row.vector),
+                vector: Array.from((row.vector || [])),
                 category: row.category,
                 scope: rowScope,
                 importance: clampImportance(Number(row.importance)),
