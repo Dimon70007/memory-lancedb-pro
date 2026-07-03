@@ -1424,7 +1424,7 @@
           "timeoutMs": {
             "type": "integer",
             "minimum": 1000,
-            "maximum": 120000,
+            "maximum": 600000,
             "default": 20000
           },
           "thinkLevel": {

@@ -64,6 +64,8 @@ function buildLegacyCombinedPayload(params) {
     const dateYmd = new Date(params.runAt).toISOString().split("T")[0];
     const deriveQuality = computeDerivedLineQuality(params.slices.derived.length);
     const deriveBaseWeight = params.usedFallback ? REFLECTION_DERIVE_FALLBACK_BASE_WEIGHT : 1;
+    // Construct session file path for the kludgey file index
+    const sessionFilePath = `/home/clawbox/.openclaw/agents/${params.agentId}/sessions/${params.sessionId}.jsonl`;
     return {
         kind: "combined-legacy",
         text: [
@@ -71,6 +73,7 @@ function buildLegacyCombinedPayload(params) {
             `Session Reflection (${new Date(params.runAt).toISOString()})`,
             `Session Key: ${params.sessionKey}`,
             `Session ID: ${params.sessionId}`,
+            `Session File: ${sessionFilePath}`,
             "",
             "Invariants:",
             ...(params.slices.invariants.length > 0 ? params.slices.invariants.map((x) => `- ${x}`) : ["- (none captured)"]),
@@ -81,12 +84,13 @@ function buildLegacyCombinedPayload(params) {
         metadata: {
             type: "memory-reflection",
             stage: "reflect-store",
-            reflectionVersion: 3,
+            reflectionVersion: 4,
             sessionKey: params.sessionKey,
             sessionId: params.sessionId,
             agentId: params.agentId,
             command: params.command,
             storedAt: params.runAt,
+            sessionFilePath: sessionFilePath,
             invariants: params.slices.invariants,
             derived: params.slices.derived,
             usedFallback: params.usedFallback,
