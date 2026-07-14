@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { extractInjectableReflectionSliceItems, extractInjectableReflectionSlices, sanitizeReflectionSliceLines, sanitizeInjectableReflectionLines, } from "./reflection-slices.js";
 import { parseReflectionMetadata } from "./reflection-metadata.js";
 import { buildReflectionEventPayload, createReflectionEventId } from "./reflection-event-store.js";
@@ -65,7 +66,7 @@ function buildLegacyCombinedPayload(params) {
     const deriveQuality = computeDerivedLineQuality(params.slices.derived.length);
     const deriveBaseWeight = params.usedFallback ? REFLECTION_DERIVE_FALLBACK_BASE_WEIGHT : 1;
     // Construct session file path for the kludgey file index
-    const sessionFilePath = `/home/clawbox/.openclaw/agents/${params.agentId}/sessions/${params.sessionId}.jsonl`;
+    const sessionFilePath = `${homedir()}/.openclaw/agents/${params.agentId}/sessions/${params.sessionId}.jsonl`;
     return {
         kind: "combined-legacy",
         text: [
