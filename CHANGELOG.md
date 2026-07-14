@@ -28,6 +28,26 @@
 
 ---
 
+### T048-9: SOLID cluster_boost refactor + topic_clusters schema fix (production)
+
+**Bug (root cause of inert cluster_boost)**: `TopicClusters.buildRow` emitted 4 fields (`hit_rate`, `recent_hits`, `avg_answer_gain`, `importance_mean`) that were missing from the `topic_clusters` table schema created by `openOrCreateTopicClustersTable`. Every `upsertTopic` threw `Found field not in schema`, swallowed by `trackTopics`' catch → `topic_clusters` stayed empty → `cluster_boost` inert (weight 0). Also `trackTopics` found no `topic`/`subtopic` in entry metadata → no topic derived.
+
+**Changes**:
+- SOLID refactor: extracted `ClusterBoostStrategy` (`src/cluster-boost.ts`) behind `ScoreBoost` interface; injected into retriever via `createRetriever({ options.scoreBoost })` (SRP/OCP/DIP); `TopicClusterProvider`/`RecallLogSink` kept narrow (ISP).
+- Schema fix: added the 4 missing columns to the `topic_clusters` creation sample; dropped+recreated the (empty) table so it picks up the full schema.
+- `trackTopics` fallback: topic = `meta.topic` || `meta.subtopic` || `entry.category` so the table populates from existing memories.
+- Verified live: store → `topic_clusters` gains a row (`agent:main::other`, active_weight=0.5 cold-start, avg_importance=0.7).
+
+**Production decisions (2026-07-09, user Q&A)**:
+- `clusterBoostEnabled: true` stays ON in prod (improve in use, don't polish forever).
+- Launch with DRY-RUN calibration weights (θ=0.04, a=0.3, b=0.2, c=0.1, d=0.05); calibrate on real `recall_log` later.
+- Wire post-hoc `used_in_answer` hook (currently dead → `recall_log.used_in_answer=0`) + add explicit 👍/👎 feedback channel; source facts/decisions from session summary via `memory-compaction-redistill`.
+- Recency wins on conflict (new > old, non-safety); guard: new info must not contradict `soul`/`system_prompt` (anti-injection).
+- Fix `memory-lancedb-pro-dreaming` cron (skipped/disabled) so complementary new+old facts consolidate during dreaming.
+- Backfill `topic_clusters` from 479 existing memories.
+
+---
+
 ## 1.1.0-beta.2 (Smart Memory Beta + Access Reinforcement)
 
 This is a **beta** release published under the npm dist-tag **`beta`** (it does not affect the stable `latest` channel).
