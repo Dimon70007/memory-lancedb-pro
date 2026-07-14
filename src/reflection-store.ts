@@ -18,6 +18,7 @@ import {
 } from "./reflection-item-store.js";
 import { getReflectionMappedDecayDefaults, type ReflectionMappedKind } from "./reflection-mapped-metadata.js";
 import { computeReflectionScore, normalizeReflectionLineForAggregation } from "./reflection-ranking.js";
+import { homedir } from "node:os";
 
 export const REFLECTION_DERIVE_LOGISTIC_MIDPOINT_DAYS = 3;
 export const REFLECTION_DERIVE_LOGISTIC_K = 1.2;
@@ -130,7 +131,7 @@ function buildLegacyCombinedPayload(params: {
   const deriveBaseWeight = params.usedFallback ? REFLECTION_DERIVE_FALLBACK_BASE_WEIGHT : 1;
 
   // Construct session file path for the kludgey file index
-  const sessionFilePath = `/home/clawbox/.openclaw/agents/${params.agentId}/sessions/${params.sessionId}.jsonl`;
+  const sessionFilePath = `${homedir()}/.openclaw/agents/${params.agentId}/sessions/${params.sessionId}.jsonl`;
 
   return {
     kind: "combined-legacy",

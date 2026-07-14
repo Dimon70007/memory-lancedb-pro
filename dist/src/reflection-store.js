@@ -1,10 +1,10 @@
-import { homedir } from "node:os";
 import { extractInjectableReflectionSliceItems, extractInjectableReflectionSlices, sanitizeReflectionSliceLines, sanitizeInjectableReflectionLines, } from "./reflection-slices.js";
 import { parseReflectionMetadata } from "./reflection-metadata.js";
 import { buildReflectionEventPayload, createReflectionEventId } from "./reflection-event-store.js";
 import { buildReflectionItemPayloads, getReflectionItemDecayDefaults, REFLECTION_DERIVED_DECAY_K, REFLECTION_DERIVED_DECAY_MIDPOINT_DAYS, REFLECTION_INVARIANT_DECAY_K, REFLECTION_INVARIANT_DECAY_MIDPOINT_DAYS, } from "./reflection-item-store.js";
 import { getReflectionMappedDecayDefaults } from "./reflection-mapped-metadata.js";
 import { computeReflectionScore, normalizeReflectionLineForAggregation } from "./reflection-ranking.js";
+import { homedir } from "node:os";
 export const REFLECTION_DERIVE_LOGISTIC_MIDPOINT_DAYS = 3;
 export const REFLECTION_DERIVE_LOGISTIC_K = 1.2;
 export const REFLECTION_DERIVE_FALLBACK_BASE_WEIGHT = 0.35;
