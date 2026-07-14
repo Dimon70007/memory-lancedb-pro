@@ -23,6 +23,8 @@ let dualMemoryHintLogged = false;
 import { MemoryStore, normalizeStoragePath } from "./src/store.js";
 import { createEmbedder, getEffectiveVectorDimensions, } from "./src/embedder.js";
 import { createRetriever, normalizeRetrievalConfig, } from "./src/retriever.js";
+import { LanceDbRecallLogSink } from "./src/recallLogSink.js";
+import { ClusterBoostStrategy } from "./src/cluster-boost.js";
 import { createScopeManager, resolveScopeFilter, isSystemBypassId, parseAgentIdFromSessionKey } from "./src/scopes.js";
 import { createMigrator } from "./src/migrate.js";
 import { registerAllMemoryTools } from "./src/tools.js";
@@ -1746,7 +1748,7 @@ function _initPluginState(api) {
         retrievalConfig.rerankApiKey = resolveSecretCredential(api, retrievalConfig.rerankApiKey, "retrieval.rerankApiKey");
     }
     const resolvedRetrievalConfig = retrievalConfig;
-    const retriever = createRetriever(store, embedder, resolvedRetrievalConfig, { decayEngine });
+    const retriever = buildMemoryRetriever(store, embedder, resolvedRetrievalConfig, decayEngine);
     const rerankCostWarning = buildAutoRecallRerankCostWarning(config, resolvedRetrievalConfig);
     if (rerankCostWarning) {
         // Gateway-boot cost advisory (#843); debug in CLI mode so every
@@ -1954,6 +1956,40 @@ export function warnForDisabledChannelPlugin(openclawConfig, logger) {
             `OpenClaw will not start ${channelName} providers until the plugin is re-enabled. ` +
             `Run "openclaw plugin enable ${channelName}" and restart the gateway.`);
     }
+}
+/**
+ * T048-PROD: build the retriever with host wiring for the recall_log sink and
+ * the topic-cluster provider. The store initializes lazily (ensureInitialized
+ * on first retrieve), so the LanceDB tables are null at construction time.
+ * Use lazy resolvers that read the live instances at retrieve time — robust to
+ * init ordering and hot-reload. Exported so test/t048-prod-wiring.mjs covers the
+ * REAL host wiring (not just the isolated retriever), guarding against the bug
+ * where topicClusterProvider was never connected in production.
+ */
+export function buildMemoryRetriever(store, embedder, resolvedRetrievalConfig, decayEngine) {
+    let _recallLogSink = null;
+    const recallLogSink = {
+        logBatch: (entries) => {
+            const t = store.getRecallLogTable();
+            if (!t)
+                return Promise.resolve();
+            if (!_recallLogSink)
+                _recallLogSink = new LanceDbRecallLogSink(t);
+            return _recallLogSink.logBatch(entries);
+        },
+    };
+    const topicClusterProvider = {
+        getActiveWeight: (topicId, scope) => store.getTopicClusters()?.getActiveWeight(topicId, scope) ?? Promise.resolve(0),
+    };
+    // T048-9 (OCP/DIP): inject the boost strategy behind the ScoreBoost abstraction
+    // instead of wiring the provider directly. The retriever depends on the
+    // abstraction; this host composes the concrete ClusterBoostStrategy.
+    const clusterBoost = new ClusterBoostStrategy(topicClusterProvider, 0.08);
+    return createRetriever(store, embedder, resolvedRetrievalConfig, {
+        decayEngine,
+        recallLogSink,
+        scoreBoost: clusterBoost,
+    });
 }
 const memoryLanceDBProPlugin = {
     id: "memory-lancedb-pro",
@@ -2268,6 +2304,24 @@ const memoryLanceDBProPlugin = {
             }
             api.logger.debug(`memory-lancedb-pro: ingress message_received channel=${ctx.channelId} account=${ctx.accountId || "unknown"} conversation=${ctx.conversationId || "unknown"} from=${event.from} len=${event.content.trim().length} preview=${summarizeTextPreview(event.content)}`);
         });
+        // T048-12: handle [DREAMING] system events emitted by the memory-lancedb-pro-dreaming cron.
+        // OpenClaw has no dedicated system_event plugin hook; cron systemEvents are delivered
+        // to the target session and surface through message_received. runDreamingSweep()
+        // guards against concurrent runs, so this is safe to fire-and-forget.
+        api.on("message_received", (event, ctx) => {
+            try {
+                const text = typeof event?.content === "string" ? event.content : "";
+                if (!text.includes("[DREAMING]"))
+                    return;
+                api.logger.info(`memory-lancedb-pro: [DREAMING] system event received (sessionKey=${ctx?.sessionKey || event?.sessionKey || "unknown"}); triggering consolidation sweep`);
+                void runDreamingSweep().catch((err) => {
+                    api.logger.warn(`memory-lancedb-pro: [DREAMING] sweep failed: ${String(err)}`);
+                });
+            }
+            catch (err) {
+                api.logger.warn(`memory-lancedb-pro: [DREAMING] handler error: ${String(err)}`);
+            }
+        });
         api.on("before_message_write", (event, ctx) => {
             const message = event.message;
             const role = message && typeof message.role === "string" && message.role.trim().length > 0
@@ -2491,6 +2545,12 @@ const memoryLanceDBProPlugin = {
                         limit: retrieveLimit,
                         scopeFilter: accessibleScopes,
                         source: "auto-recall",
+                        // T048-10 fix: ctx.sessionKey is frequently undefined in before_prompt_build,
+                        // but event.sessionKey carries the real session key (the same one the
+                        // message:sent post-hoc hook uses to look candidates up). Without this,
+                        // trackCandidate falls back to `source` and the hook never matches ->
+                        // used_in_answer stays 0 forever.
+                        sessionKey: ctx.sessionKey || event.sessionKey,
                         signal: autoRecallAbortController.signal,
                         ...(autoRecallRerankTimeoutMs !== undefined
                             ? {
@@ -3354,6 +3414,41 @@ const memoryLanceDBProPlugin = {
                     description: "Queue self-improvement reminder before /reset",
                 });
             }
+            // ========================================================================
+            // T048-HOST: post-hoc used_in_answer backfill via message:sent hook
+            // ========================================================================
+            // When OpenClaw delivers the agent's answer, heuristically mark which
+            // recalled candidates actually appeared in the response. This is the
+            // learning signal that calibration (T048-6) depends on. Non-fatal.
+            api.registerHook("message:sent", async (event) => {
+                try {
+                    const sessionKey = event.sessionKey ?? "global";
+                    const response = typeof event.context?.content === "string" ? event.context.content : "";
+                    if (!response)
+                        return;
+                    const candidates = store.getTrackedCandidates(sessionKey);
+                    if (candidates.size === 0)
+                        return;
+                    const norm = (s) => s.toLowerCase().replace(/\s+/g, " ").trim();
+                    const rNorm = norm(response);
+                    const usedIds = [];
+                    for (const [candidateId, text] of candidates) {
+                        const cNorm = norm(text);
+                        // Heuristic: candidate counts as "used" if a meaningful prefix of its
+                        // text appears verbatim in the response (catches direct reuse).
+                        if (cNorm.length >= 20 && rNorm.includes(cNorm.slice(0, 40))) {
+                            usedIds.push(candidateId);
+                        }
+                    }
+                    if (usedIds.length > 0) {
+                        await store.markUsedInAnswer(usedIds);
+                    }
+                    store.clearTrackedCandidates(sessionKey);
+                }
+                catch (e) {
+                    // never break delivery
+                }
+            });
             (isCliMode() ? api.logger.debug : api.logger.info)("self-improvement: integrated hooks registered (agent:bootstrap, command:new, command:reset)");
         }
         // ========================================================================
@@ -4139,8 +4234,10 @@ const memoryLanceDBProPlugin = {
             }
         }
         async function runDreamingSweep() {
-            if (config.dreaming?.enabled !== true)
-                return;
+            // T048-12 / 2026-07-10: dreaming is driven by the memory-lancedb-pro-dreaming cron
+            // (fires [DREAMING] -> this function). Deliberately NOT gated on
+            // config.dreaming.enabled: Dmitriy keeps dreaming out of openclaw.json (cron-only
+            // approach), so config.dreaming is absent. The cron handler calls this directly.
             if (dreamingScheduler.stopped)
                 return;
             if (dreamingScheduler.running) {
@@ -4152,7 +4249,7 @@ const memoryLanceDBProPlugin = {
             try {
                 const result = await dreamingEngine.runSweep();
                 const changed = Object.values(result.phases).reduce((sum, phase) => sum + phase.changed, 0);
-                if (changed > 0 || result.errors.length > 0 || config.dreaming.verboseLogging) {
+                if (changed > 0 || result.errors.length > 0 || config.dreaming?.verboseLogging) {
                     api.logger.info(`memory-lancedb-pro: dreaming sweep completed ` +
                         `(changed=${changed}, scopes=${result.scopes.length}, errors=${result.errors.length}, elapsedMs=${Date.now() - startedAt})`);
                 }

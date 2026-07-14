@@ -290,6 +290,7 @@ async function createMemoryLanceSearchManager(params, agentId) {
                 limit: requestedSources ? clampResultLimit(opts?.maxResults) * 3 : clampResultLimit(opts?.maxResults),
                 scopeFilter,
                 source: "manual",
+                sessionKey: opts?.sessionKey,
             });
             const minScore = typeof opts?.minScore === "number" ? opts.minScore : undefined;
             await refreshStats().catch(() => undefined);

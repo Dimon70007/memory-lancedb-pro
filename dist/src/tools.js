@@ -2285,6 +2285,56 @@ export function registerMemoryExplainRankTool(api, context) {
         };
     }, { name: "memory_explain_rank" });
 }
+export function registerMemoryFeedbackTool(api, context) {
+    api.registerTool((toolCtx) => {
+        const runtimeContext = resolveToolContext(context, toolCtx);
+        return {
+            name: "memory_feedback",
+            label: "Memory Feedback",
+            description: "Record explicit user feedback for a recalled memory candidate. Use 👍 (+1) when the memory was helpful/correct, 👎 (-1) when wrong/stale, 0 for neutral. Feeds the calibration loop (cluster_boost, importance, used_in_answer). T048-11.",
+            parameters: Type.Object({
+                candidateId: Type.String({
+                    description: "Memory/candidate ID to give feedback on (from recall_log or a recalled memory)",
+                }),
+                feedback: Type.Number({
+                    description: "Feedback value: +1 (helpful/correct), -1 (wrong/stale), 0 (neutral)",
+                }),
+            }),
+            async execute(_toolCallId, params, _signal, _onUpdate, runtimeCtx) {
+                const { candidateId, feedback } = params;
+                try {
+                    if (!candidateId || typeof candidateId !== "string") {
+                        return {
+                            content: [{ type: "text", text: "Missing required parameter: candidateId." }],
+                            details: { error: "missing_candidateId" },
+                        };
+                    }
+                    const fb = Math.sign(Number(feedback) || 0);
+                    await context.store.recordFeedback(candidateId, fb);
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Feedback ${fb} recorded for candidate ${candidateId}.`,
+                            },
+                        ],
+                    };
+                }
+                catch (error) {
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Memory feedback failed: ${error instanceof Error ? error.message : String(error)}`,
+                            },
+                        ],
+                        details: { error: "feedback_failed", message: String(error) },
+                    };
+                }
+            },
+        };
+    }, { name: "memory_feedback" });
+}
 // ============================================================================
 // Tool Registration Helper
 // ============================================================================
@@ -2297,6 +2347,7 @@ export function registerAllMemoryTools(api, context, options = {}) {
     registerMemoryStoreTool(api, context);
     registerMemoryForgetTool(api, context);
     registerMemoryUpdateTool(api, context);
+    registerMemoryFeedbackTool(api, context);
     // Management tools (optional)
     if (options.enableManagementTools) {
         registerMemoryStatsTool(api, context);
