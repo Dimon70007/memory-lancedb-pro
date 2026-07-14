@@ -9,6 +9,42 @@
 
 ## Unreleased
 
+### Fork (Dimon70007/memory-lancedb-pro, branch `fork-timeoutms`) — custom changes
+
+Divergence point from upstream (`CortexReach/memory-lancedb-pro`): `2f2be72`.
+These are the changes carried by this local fork. See `FORK.md` for the full
+fork policy and restore procedure.
+
+- **fix (timeoutms): portable session file path** — `src/reflection-store.ts`
+  now builds the kludgey-file-index session path from `${homedir()}/.openclaw/...`
+  instead of a hardcoded `/home/clawbox/.openclaw/...`, so the plugin works on
+  any host/user. (commit `f308f19`)
+- **feat (T048-11): `memory_feedback` tool** — explicit 👍/👎/neutral feedback
+  channel for recalled candidates, feeding the calibration loop
+  (`cluster_boost`, importance, `used_in_answer`). Registered in
+  `registerAllMemoryTools`. (`src/tools.ts`)
+- **feat (T048-HOST): recall-log `sessionKey` correlation** — `RetrievalContext`
+  gains `sessionKey`; the recall-log sink now correlates tracked candidates with
+  the post-hoc `used_in_answer` hook (`context.sessionKey ?? context.source ??
+  "global"`). (`src/retriever.ts`)
+- **feat (T048): production host-wiring** — `buildMemoryRetriever()` in `index.ts`
+  injects `LanceDbRecallLogSink`, `TopicClusterProvider` (lazy resolvers reading
+  live store tables) and `ClusterBoostStrategy` behind the `ScoreBoost`
+  abstraction; handles `[DREAMING]` system events for the
+  `memory-lancedb-pro-dreaming` cron. New modules: `src/cluster-boost.ts`,
+  `src/recallLogSink.ts`, `src/topic-clusters.ts`, `src/calibration.ts`.
+- **chore: line-ending normalization** — `src/reflection-store.ts` and
+  `index.ts` normalized CRLF→LF; added `.gitattributes` (`* text=auto eol=lf`)
+  to prevent future whole-file line-ending churn on upstream merges.
+- **chore: config schema** — `openclaw.plugin.json` gains `clusterBoostEnabled`
+  (default `false`) and `clusterBoostTheta` (per-scope θ weights) for the T048
+  cluster-boost feature.
+- **test/scripts**: `test/t048-prod-wiring.mjs` wired into the `test` script;
+  added calibration/cluster-boost/recall-log/topic-cluster test suites and
+  `scripts/gen-synthetic-recalllog.mjs`, `scripts/run-calibration.mjs`.
+
+---
+
 ### Fix: cumulative turn counting for auto-capture smart extraction (#417, PR #549)
 
 **Bug**: With `extractMinMessages: 2` + `smartExtraction: true`, single-turn DM conversations always fell through to regex fallback, writing dirty data (`l0_abstract == text`, no LLM distillation).
