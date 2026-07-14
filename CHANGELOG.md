@@ -42,6 +42,13 @@ fork policy and restore procedure.
 - **test/scripts**: `test/t048-prod-wiring.mjs` wired into the `test` script;
   added calibration/cluster-boost/recall-log/topic-cluster test suites and
   `scripts/gen-synthetic-recalllog.mjs`, `scripts/run-calibration.mjs`.
+- **tests for fork features**: `test/memory-feedback-tool.mjs` (T048-11 tool:
+  sign normalization, validation, non-fatal store errors),
+  `test/retriever-sessionkey-correlation.mjs` (T048-HOST session_key precedence
+  `sessionKey > source > global` + candidate tracking),
+  `test/dreaming-event-handler.mjs` (T048-12 `[DREAMING]` message_received
+  wiring regression); wired these + the previously-orphaned
+  `test/recall-log-posthoc.mjs` into the `test` script.
 
 ---
 
