@@ -2304,6 +2304,24 @@ const memoryLanceDBProPlugin = {
             }
             api.logger.debug(`memory-lancedb-pro: ingress message_received channel=${ctx.channelId} account=${ctx.accountId || "unknown"} conversation=${ctx.conversationId || "unknown"} from=${event.from} len=${event.content.trim().length} preview=${summarizeTextPreview(event.content)}`);
         });
+        // T048-12: handle [DREAMING] system events emitted by the memory-lancedb-pro-dreaming cron.
+        // OpenClaw has no dedicated system_event plugin hook; cron systemEvents are delivered
+        // to the target session and surface through message_received. runDreamingSweep()
+        // guards against concurrent runs, so this is safe to fire-and-forget.
+        api.on("message_received", (event, ctx) => {
+            try {
+                const text = typeof event?.content === "string" ? event.content : "";
+                if (!text.includes("[DREAMING]"))
+                    return;
+                api.logger.info(`memory-lancedb-pro: [DREAMING] system event received (sessionKey=${ctx?.sessionKey || event?.sessionKey || "unknown"}); triggering consolidation sweep`);
+                void runDreamingSweep().catch((err) => {
+                    api.logger.warn(`memory-lancedb-pro: [DREAMING] sweep failed: ${String(err)}`);
+                });
+            }
+            catch (err) {
+                api.logger.warn(`memory-lancedb-pro: [DREAMING] handler error: ${String(err)}`);
+            }
+        });
         api.on("before_message_write", (event, ctx) => {
             const message = event.message;
             const role = message && typeof message.role === "string" && message.role.trim().length > 0
@@ -2527,6 +2545,12 @@ const memoryLanceDBProPlugin = {
                         limit: retrieveLimit,
                         scopeFilter: accessibleScopes,
                         source: "auto-recall",
+                        // T048-10 fix: ctx.sessionKey is frequently undefined in before_prompt_build,
+                        // but event.sessionKey carries the real session key (the same one the
+                        // message:sent post-hoc hook uses to look candidates up). Without this,
+                        // trackCandidate falls back to `source` and the hook never matches ->
+                        // used_in_answer stays 0 forever.
+                        sessionKey: ctx.sessionKey || event.sessionKey,
                         signal: autoRecallAbortController.signal,
                         ...(autoRecallRerankTimeoutMs !== undefined
                             ? {
@@ -4210,8 +4234,10 @@ const memoryLanceDBProPlugin = {
             }
         }
         async function runDreamingSweep() {
-            if (config.dreaming?.enabled !== true)
-                return;
+            // T048-12 / 2026-07-10: dreaming is driven by the memory-lancedb-pro-dreaming cron
+            // (fires [DREAMING] -> this function). Deliberately NOT gated on
+            // config.dreaming.enabled: Dmitriy keeps dreaming out of openclaw.json (cron-only
+            // approach), so config.dreaming is absent. The cron handler calls this directly.
             if (dreamingScheduler.stopped)
                 return;
             if (dreamingScheduler.running) {
@@ -4223,7 +4249,7 @@ const memoryLanceDBProPlugin = {
             try {
                 const result = await dreamingEngine.runSweep();
                 const changed = Object.values(result.phases).reduce((sum, phase) => sum + phase.changed, 0);
-                if (changed > 0 || result.errors.length > 0 || config.dreaming.verboseLogging) {
+                if (changed > 0 || result.errors.length > 0 || config.dreaming?.verboseLogging) {
                     api.logger.info(`memory-lancedb-pro: dreaming sweep completed ` +
                         `(changed=${changed}, scopes=${result.scopes.length}, errors=${result.errors.length}, elapsedMs=${Date.now() - startedAt})`);
                 }

@@ -6,6 +6,7 @@ import {
   type CanonicalCorpusConfig,
   type CanonicalCorpusIndexer,
 } from "./corpus-indexer.js";
+import type { RetrievalContext } from "./retriever.js";
 
 type MemorySource = "memory" | "sessions";
 
@@ -83,13 +84,8 @@ type MemoryCapabilityParams = {
   };
   canonicalCorpus?: CanonicalCorpusConfig;
   canonicalCorpusIndexer?: Pick<CanonicalCorpusIndexer, "sync" | "readFile">;
-  retriever?: {
-    retrieve(params: {
-      query: string;
-      limit: number;
-      scopeFilter?: string[];
-      source?: "manual" | "auto-recall" | "cli";
-    }): Promise<RetrievalResultLike[]>;
+  retriever: {
+    retrieve(params: RetrievalContext): Promise<RetrievalResultLike[]>;
   };
   resolveScopeFilterForAgent?: (agentId: string) => string[] | undefined;
   getRuntimeStatus: () => MemoryRuntimeStatus;
@@ -456,6 +452,7 @@ async function createMemoryLanceSearchManager(params: MemoryCapabilityParams, ag
         limit: requestedSources ? clampResultLimit(opts?.maxResults) * 3 : clampResultLimit(opts?.maxResults),
         scopeFilter,
         source: "manual",
+        sessionKey: opts?.sessionKey,
       });
       const minScore = typeof opts?.minScore === "number" ? opts.minScore : undefined;
       await refreshStats().catch(() => undefined);

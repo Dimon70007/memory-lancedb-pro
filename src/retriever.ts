@@ -123,6 +123,10 @@ export interface RetrievalContext {
   category?: string;
   /** Retrieval source: "manual" for user-triggered, "auto-recall" for system-initiated, "cli" for CLI commands. */
   source?: "manual" | "auto-recall" | "cli";
+  /** Conversation/session key used to correlate tracked candidates with the
+   * post-hoc used_in_answer hook (T048-HOST). Falls back to `source` then
+   * "global" when absent. */
+  sessionKey?: string;
   /** Optional cancellation signal for callers with an outer timeout budget. */
   signal?: AbortSignal;
   /** Optional per-call rerank timeout. Lets callers reserve time for fallback work inside an outer budget. */
@@ -809,7 +813,7 @@ export class MemoryRetriever {
       }
 
       if (this.recallLogSink) {
-        const sessionKey = context.source ?? "global";
+        const sessionKey = context.sessionKey ?? context.source ?? "global";
         const logEntries: RecallLogEntry[] = results.map((r, idx) => {
           const meta = parseSmartMetadata(r.entry.metadata, r.entry) as Record<string, unknown>;
           const topicId = typeof meta?.parent_topic_id === "string" ? meta.parent_topic_id : null;

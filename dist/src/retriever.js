@@ -457,7 +457,7 @@ export class MemoryRetriever {
                 this.accessTracker.recordAccess(results.map((r) => r.entry.id));
             }
             if (this.recallLogSink) {
-                const sessionKey = context.source ?? "global";
+                const sessionKey = context.sessionKey ?? context.source ?? "global";
                 const logEntries = results.map((r, idx) => {
                     const meta = parseSmartMetadata(r.entry.metadata, r.entry);
                     const topicId = typeof meta?.parent_topic_id === "string" ? meta.parent_topic_id : null;

@@ -9,6 +9,42 @@
 
 ## Unreleased
 
+### Fork (Dimon70007/memory-lancedb-pro, branch `fork-timeoutms`) — custom changes
+
+Divergence point from upstream (`CortexReach/memory-lancedb-pro`): `2f2be72`.
+These are the changes carried by this local fork. See `FORK.md` for the full
+fork policy and restore procedure.
+
+- **fix (timeoutms): portable session file path** — `src/reflection-store.ts`
+  now builds the kludgey-file-index session path from `${homedir()}/.openclaw/...`
+  instead of a hardcoded `/home/clawbox/.openclaw/...`, so the plugin works on
+  any host/user. (commit `f308f19`)
+- **feat (T048-11): `memory_feedback` tool** — explicit 👍/👎/neutral feedback
+  channel for recalled candidates, feeding the calibration loop
+  (`cluster_boost`, importance, `used_in_answer`). Registered in
+  `registerAllMemoryTools`. (`src/tools.ts`)
+- **feat (T048-HOST): recall-log `sessionKey` correlation** — `RetrievalContext`
+  gains `sessionKey`; the recall-log sink now correlates tracked candidates with
+  the post-hoc `used_in_answer` hook (`context.sessionKey ?? context.source ??
+  "global"`). (`src/retriever.ts`)
+- **feat (T048): production host-wiring** — `buildMemoryRetriever()` in `index.ts`
+  injects `LanceDbRecallLogSink`, `TopicClusterProvider` (lazy resolvers reading
+  live store tables) and `ClusterBoostStrategy` behind the `ScoreBoost`
+  abstraction; handles `[DREAMING]` system events for the
+  `memory-lancedb-pro-dreaming` cron. New modules: `src/cluster-boost.ts`,
+  `src/recallLogSink.ts`, `src/topic-clusters.ts`, `src/calibration.ts`.
+- **chore: line-ending normalization** — `src/reflection-store.ts` and
+  `index.ts` normalized CRLF→LF; added `.gitattributes` (`* text=auto eol=lf`)
+  to prevent future whole-file line-ending churn on upstream merges.
+- **chore: config schema** — `openclaw.plugin.json` gains `clusterBoostEnabled`
+  (default `false`) and `clusterBoostTheta` (per-scope θ weights) for the T048
+  cluster-boost feature.
+- **test/scripts**: `test/t048-prod-wiring.mjs` wired into the `test` script;
+  added calibration/cluster-boost/recall-log/topic-cluster test suites and
+  `scripts/gen-synthetic-recalllog.mjs`, `scripts/run-calibration.mjs`.
+
+---
+
 ### Fix: cumulative turn counting for auto-capture smart extraction (#417, PR #549)
 
 **Bug**: With `extractMinMessages: 2` + `smartExtraction: true`, single-turn DM conversations always fell through to regex fallback, writing dirty data (`l0_abstract == text`, no LLM distillation).
@@ -25,6 +61,26 @@
 - **Test**: added `runCumulativeTurnCountingScenario` in `test/smart-extractor-branches.mjs` verifying turn-1 skip and turn-2 trigger with `extractMinMessages=2`
 
 **⚠️ Breaking change**: `extractMinMessages` semantics changed from "per-event message count" to "cumulative conversation turns". Before: each `agent_end` needed ≥N messages. After: smart extraction triggers at conversation turn N. This is a bug fix since the old semantics were structurally broken for DM; users relying on the old behavior may need to adjust their `extractMinMessages` values.
+
+---
+
+### T048-9: SOLID cluster_boost refactor + topic_clusters schema fix (production)
+
+**Bug (root cause of inert cluster_boost)**: `TopicClusters.buildRow` emitted 4 fields (`hit_rate`, `recent_hits`, `avg_answer_gain`, `importance_mean`) that were missing from the `topic_clusters` table schema created by `openOrCreateTopicClustersTable`. Every `upsertTopic` threw `Found field not in schema`, swallowed by `trackTopics`' catch → `topic_clusters` stayed empty → `cluster_boost` inert (weight 0). Also `trackTopics` found no `topic`/`subtopic` in entry metadata → no topic derived.
+
+**Changes**:
+- SOLID refactor: extracted `ClusterBoostStrategy` (`src/cluster-boost.ts`) behind `ScoreBoost` interface; injected into retriever via `createRetriever({ options.scoreBoost })` (SRP/OCP/DIP); `TopicClusterProvider`/`RecallLogSink` kept narrow (ISP).
+- Schema fix: added the 4 missing columns to the `topic_clusters` creation sample; dropped+recreated the (empty) table so it picks up the full schema.
+- `trackTopics` fallback: topic = `meta.topic` || `meta.subtopic` || `entry.category` so the table populates from existing memories.
+- Verified live: store → `topic_clusters` gains a row (`agent:main::other`, active_weight=0.5 cold-start, avg_importance=0.7).
+
+**Production decisions (2026-07-09, user Q&A)**:
+- `clusterBoostEnabled: true` stays ON in prod (improve in use, don't polish forever).
+- Launch with DRY-RUN calibration weights (θ=0.04, a=0.3, b=0.2, c=0.1, d=0.05); calibrate on real `recall_log` later.
+- Wire post-hoc `used_in_answer` hook (currently dead → `recall_log.used_in_answer=0`) + add explicit 👍/👎 feedback channel; source facts/decisions from session summary via `memory-compaction-redistill`.
+- Recency wins on conflict (new > old, non-safety); guard: new info must not contradict `soul`/`system_prompt` (anti-injection).
+- Fix `memory-lancedb-pro-dreaming` cron (skipped/disabled) so complementary new+old facts consolidate during dreaming.
+- Backfill `topic_clusters` from 479 existing memories.
 
 ---
 
