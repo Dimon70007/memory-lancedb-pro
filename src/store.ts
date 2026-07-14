@@ -28,6 +28,7 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { matchesMemoryCategoryFilter, resolveCategoryFilterCandidates } from "./memory-categories.js";
+import { TopicClusters, type TopicClusterTable } from "./topic-clusters.js";
 import {
   RedisLockAcquisitionError,
   RedisLockLeaseIntegrityError,
@@ -573,6 +574,9 @@ const TABLE_NAME = "memories";
 export class MemoryStore {
   private db: LanceDB.Connection | null = null;
   private table: LanceDB.Table | null = null;
+  private topicClustersTable: LanceDB.Table | null = null;
+  private recallLogTable: LanceDB.Table | null = null;
+  private topicClusters: TopicClusters | null = null;
   private initPromise: Promise<void> | null = null;
   private ftsIndexCreated = false;
   private _lastFtsError: string | null = null;
@@ -933,6 +937,22 @@ export class MemoryStore {
     this.db = db;
     this.table = table;
 
+    // T048: topic_clusters + recall_log tables (best-effort, non-fatal).
+    try {
+      this.topicClustersTable = await this.openOrCreateTopicClustersTable(db);
+      this.topicClusters = new TopicClusters(
+        this.topicClustersTable as unknown as TopicClusterTable,
+        {},
+      );
+    } catch (err) {
+      console.warn("[memory-lancedb-pro] topic_clusters table unavailable:", err);
+    }
+    try {
+      this.recallLogTable = await this.openOrCreateRecallLogTable(db);
+    } catch (err) {
+      console.warn("[memory-lancedb-pro] recall_log table unavailable:", err);
+    }
+
     // Fold any unindexed backlog accumulated while no maintenance ran
     // (best-effort, runs in the background, never blocks initialization).
     void this.scheduleStartupIndexCatchUp();
@@ -1047,6 +1067,88 @@ export class MemoryStore {
 
     await this.migrateLegacyTableColumns(table);
     return table;
+  }
+
+  private async openOrCreateTopicClustersTable(db: LanceDB.Connection): Promise<LanceDB.Table> {
+    const name = "topic_clusters";
+    try {
+      return await db.openTable(name);
+    } catch {
+      return this.runWithWriteLock(async () => {
+        try {
+          return await db.openTable(name);
+        } catch {
+          const dim = this.config.vectorDim;
+          const sample = {
+            topic_id: "__schema__",
+            scope: "global",
+            topic: "__schema__",
+            vector: Array.from({ length: dim }).fill(0),
+            doc_count: 0,
+            hit_count: 0,
+            hit_rate: 0,
+            recent_hits: 0,
+            avg_answer_gain: 0,
+            last_hit_ts: 0,
+            avg_importance: 0,
+            importance_mean: 0,
+            avg_confidence: 0,
+            active_weight: 0,
+            decay_rate: 0,
+            status: "active",
+            metadata: "{}",
+          };
+          try {
+            const t = await db.createTable(name, [sample]);
+            await t.delete("topic_id = '__schema__'");
+            return t;
+          } catch (createErr) {
+            if (String(createErr).includes("already exists")) return await db.openTable(name);
+            throw createErr;
+          }
+        }
+      });
+    }
+  }
+
+  private async openOrCreateRecallLogTable(db: LanceDB.Connection): Promise<LanceDB.Table> {
+    const name = "recall_log";
+    try {
+      return await db.openTable(name);
+    } catch {
+      return this.runWithWriteLock(async () => {
+        try {
+          return await db.openTable(name);
+        } catch {
+          // T048 §4: recall_log schema. LanceDB cannot infer a type from a
+          // null first value, so use sentinel (non-null) values in the sample row,
+          // then delete it. NOTE: the live logging path is the external
+          // recallLogSink wired in the retriever (4c); the store does NOT write
+          // to this table, so the inferred (non-null) schema is safe here.
+          const sample = {
+            query_id: "__schema__",
+            session_key: "global",
+            query_text: "",
+            candidate_id: "",
+            topic_id: "__schema__",
+            score_raw: 0,
+            score_final: 0,
+            used_in_answer: false,
+            user_feedback: 0,
+            recall_ts: 0,
+            metadata: "{}",
+          };
+          try {
+            const t = await db.createTable(name, [sample]);
+            await t.delete("query_id = '__schema__'");
+            return t;
+          } catch (createErr) {
+            if (String(createErr).includes("already exists")) return await db.openTable(name);
+            throw createErr;
+          }
+        }
+      });
+    }
   }
 
   private async backfillLegacySecondTimestamps(table: LanceDB.Table): Promise<void> {
@@ -1220,6 +1322,7 @@ export class MemoryStore {
         importance: clampImportance(entry.importance),
       };
       await this.table!.add([normalizedEntry]);
+      void this.trackTopics([normalizedEntry]).catch(() => undefined);
       return normalizedEntry;
     }));
     this.noteDataModification();
@@ -1246,6 +1349,107 @@ export class MemoryStore {
    *
    * @public
    */
+  /**
+   * T048: best-effort topic-cluster tracking. Extracts topic from each entry's
+   * metadata and upserts the dynamic topic cluster. Non-fatal — never throws.
+   */
+  private async trackTopics(
+    entries: Array<{ scope?: string; vector?: number[]; importance?: number; metadata?: string; category?: string }>,
+  ): Promise<void> {
+    if (!this.topicClusters) return;
+    for (const entry of entries) {
+      try {
+        const meta = JSON.parse(entry.metadata || "{}") as Record<string, unknown>;
+        // T048-9 (restore functionality): derive a topic from explicit
+        // metadata (topic/subtopic) when present, otherwise fall back to the
+        // entry's category so topic_clusters actually populates. Without this
+        // fallback the table stays empty and cluster_boost is inert (weight 0).
+        const topic = (meta?.topic as string) || (meta?.subtopic as string) || entry.category;
+        if (!topic) continue;
+        const scope = entry.scope || "global";
+        const topicId = TopicClusters.topicId(scope, topic);
+        await this.topicClusters.upsertTopic({
+          topicId,
+          scope,
+          vector: entry.vector || [],
+          importance: Number(entry.importance) || 0.5,
+        });
+      } catch {
+        // best-effort: never break the write path
+      }
+    }
+  }
+
+  /** T048: expose the topic-cluster provider for the retriever (host wires it). */
+  getTopicClusters(): TopicClusters | null {
+    return this.topicClusters;
+  }
+
+  /** T048-6: expose the topic_clusters table so calibration can read raw rows. */
+  getTopicClustersTable(): LanceDB.Table | null {
+    return this.topicClustersTable;
+  }
+
+  /** T048-5: expose the recall_log table so the host can wire a RecallLogSink. */
+  getRecallLogTable(): LanceDB.Table | null {
+    return this.recallLogTable;
+  }
+
+  /**
+   * T048-HOST: post-hoc backfill of `used_in_answer` for candidates that ended
+   * up in the final answer. Called by the host (or a message:sent hook) after
+   * the answer is produced. Updates all recall_log rows for the given
+   * candidate_ids (a candidate can appear in multiple recall events).
+   */
+  async markUsedInAnswer(candidateIds: string[]): Promise<void> {
+    const table = this.recallLogTable;
+    if (!table || candidateIds.length === 0) return;
+    for (const id of candidateIds) {
+      if (!id) continue;
+      await table.update({
+        where: `candidate_id = '${id.replace(/'/g, "''")}'`,
+        values: { used_in_answer: true },
+      }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * T048-HOST: post-hoc backfill of `user_feedback` for a candidate.
+   * `feedback` is typically -1 (rejected) / 0 (neutral) / +1 (helpful).
+   */
+  async recordFeedback(candidateId: string, feedback: number): Promise<void> {
+    const table = this.recallLogTable;
+    if (!table || !candidateId) return;
+    await table.update({
+      where: `candidate_id = '${candidateId.replace(/'/g, "''")}'`,
+      values: { user_feedback: feedback },
+    }).catch(() => undefined);
+  }
+
+  // --- T048-HOST: per-session candidate tracking for post-hoc used_in_answer ---
+  // Maps sessionKey -> (candidateId -> candidate text). Populated by the
+  // retriever hook on each retrieve; consumed by the message:sent hook to
+  // heuristically mark which returned candidates actually appeared in the answer.
+  private sessionCandidates = new Map<string, Map<string, string>>();
+
+  /** Record a returned candidate for the current session (called by retriever hook). */
+  trackCandidate(sessionKey: string, candidateId: string, text: string): void {
+    if (!sessionKey || !candidateId) return;
+    let m = this.sessionCandidates.get(sessionKey);
+    if (!m) { m = new Map(); this.sessionCandidates.set(sessionKey, m); }
+    m.set(candidateId, text);
+  }
+
+  /** Get candidates tracked for a session (candidateId -> text). */
+  getTrackedCandidates(sessionKey: string): Map<string, string> {
+    return this.sessionCandidates.get(sessionKey) ?? new Map();
+  }
+
+  /** Clear tracked candidates for a session (call after post-hoc processing). */
+  clearTrackedCandidates(sessionKey: string): void {
+    this.sessionCandidates.delete(sessionKey);
+  }
+
   async bulkStore(
     entries: Omit<MemoryEntry, "id" | "timestamp">[],
   ): Promise<MemoryEntry[]> {
@@ -1446,6 +1650,7 @@ export class MemoryStore {
           }
         } else {
           caller.resolve(caller.entries);
+          void this.trackTopics(caller.entries).catch(() => undefined);
         }
         callerIdx++;
       }

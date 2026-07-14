@@ -36,7 +36,12 @@ import {
   normalizeRetrievalConfig,
   type RetrievalConfig,
   type RetrievalConfigInput,
+  type RecallLogSink,
+  type TopicClusterProvider,
+  type MemoryRetriever,
 } from "./src/retriever.js";
+import { LanceDbRecallLogSink } from "./src/recallLogSink.js";
+import { ClusterBoostStrategy, type ScoreBoost } from "./src/cluster-boost.js";
 import { createScopeManager, resolveScopeFilter, isSystemBypassId, parseAgentIdFromSessionKey } from "./src/scopes.js";
 import { createMigrator } from "./src/migrate.js";
 import { registerAllMemoryTools } from "./src/tools.js";
@@ -2389,12 +2394,7 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
     );
   }
   const resolvedRetrievalConfig = retrievalConfig as RetrievalConfig;
-  const retriever = createRetriever(
-    store,
-    embedder,
-    resolvedRetrievalConfig,
-    { decayEngine },
-  );
+  const retriever = buildMemoryRetriever(store, embedder, resolvedRetrievalConfig, decayEngine);
   const rerankCostWarning = buildAutoRecallRerankCostWarning(config, resolvedRetrievalConfig);
   if (rerankCostWarning) {
     // Gateway-boot cost advisory (#843); debug in CLI mode so every
@@ -2637,6 +2637,45 @@ export function warnForDisabledChannelPlugin(
       `Run "openclaw plugin enable ${channelName}" and restart the gateway.`,
     );
   }
+}
+
+/**
+ * T048-PROD: build the retriever with host wiring for the recall_log sink and
+ * the topic-cluster provider. The store initializes lazily (ensureInitialized
+ * on first retrieve), so the LanceDB tables are null at construction time.
+ * Use lazy resolvers that read the live instances at retrieve time — robust to
+ * init ordering and hot-reload. Exported so test/t048-prod-wiring.mjs covers the
+ * REAL host wiring (not just the isolated retriever), guarding against the bug
+ * where topicClusterProvider was never connected in production.
+ */
+export function buildMemoryRetriever(
+  store: MemoryStore,
+  embedder: ReturnType<typeof createEmbedder>,
+  resolvedRetrievalConfig: RetrievalConfig,
+  decayEngine: ReturnType<typeof createDecayEngine>,
+): MemoryRetriever {
+  let _recallLogSink: LanceDbRecallLogSink | null = null;
+  const recallLogSink: RecallLogSink = {
+    logBatch: (entries) => {
+      const t = store.getRecallLogTable();
+      if (!t) return Promise.resolve();
+      if (!_recallLogSink) _recallLogSink = new LanceDbRecallLogSink(t);
+      return _recallLogSink.logBatch(entries);
+    },
+  };
+  const topicClusterProvider: TopicClusterProvider = {
+    getActiveWeight: (topicId, scope) =>
+      store.getTopicClusters()?.getActiveWeight(topicId, scope) ?? Promise.resolve(0),
+  };
+  // T048-9 (OCP/DIP): inject the boost strategy behind the ScoreBoost abstraction
+  // instead of wiring the provider directly. The retriever depends on the
+  // abstraction; this host composes the concrete ClusterBoostStrategy.
+  const clusterBoost: ScoreBoost = new ClusterBoostStrategy(topicClusterProvider, 0.08);
+  return createRetriever(store, embedder, resolvedRetrievalConfig, {
+    decayEngine,
+    recallLogSink,
+    scoreBoost: clusterBoost,
+  });
 }
 
 const memoryLanceDBProPlugin = {
@@ -4373,6 +4412,40 @@ const memoryLanceDBProPlugin = {
           description: "Queue self-improvement reminder before /reset",
         });
       }
+
+      // ========================================================================
+      // T048-HOST: post-hoc used_in_answer backfill via message:sent hook
+      // ========================================================================
+      // When OpenClaw delivers the agent's answer, heuristically mark which
+      // recalled candidates actually appeared in the response. This is the
+      // learning signal that calibration (T048-6) depends on. Non-fatal.
+      api.registerHook("message:sent", async (event: { sessionKey?: string; context?: { content?: string } }) => {
+        try {
+          const sessionKey = event.sessionKey ?? "global";
+          const response = typeof event.context?.content === "string" ? event.context.content : "";
+          if (!response) return;
+          const candidates = store.getTrackedCandidates(sessionKey);
+          if (candidates.size === 0) return;
+
+          const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+          const rNorm = norm(response);
+          const usedIds: string[] = [];
+          for (const [candidateId, text] of candidates) {
+            const cNorm = norm(text);
+            // Heuristic: candidate counts as "used" if a meaningful prefix of its
+            // text appears verbatim in the response (catches direct reuse).
+            if (cNorm.length >= 20 && rNorm.includes(cNorm.slice(0, 40))) {
+              usedIds.push(candidateId);
+            }
+          }
+          if (usedIds.length > 0) {
+            await store.markUsedInAnswer(usedIds);
+          }
+          store.clearTrackedCandidates(sessionKey);
+        } catch (e) {
+          // never break delivery
+        }
+      });
 
       (isCliMode() ? api.logger.debug : api.logger.info)(
         "self-improvement: integrated hooks registered (agent:bootstrap, command:new, command:reset)"

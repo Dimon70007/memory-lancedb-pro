@@ -23,6 +23,7 @@ import {
 import { matchesMemoryCategoryFilter } from "./memory-categories.js";
 import { TraceCollector, type RetrievalTrace } from "./retrieval-trace.js";
 import { RetrievalStatsCollector } from "./retrieval-stats.js";
+import { ClusterBoostStrategy, type ScoreBoost } from "./cluster-boost.js";
 
 // ============================================================================
 // Types & Configuration
@@ -99,6 +100,10 @@ export interface RetrievalConfig {
   tagPrefixes: string[];
   /** Default-off retrieval-time BM25 neighbors attached after MMR in hybrid mode. */
   neighborEnrichment: NeighborEnrichmentConfig;
+  /** T048: enable topic-cluster boost in scoring. Flagged-off by default (high-stakes change). */
+  clusterBoostEnabled?: boolean;
+  /** T048: per-scope theta weights for cluster_boost. Falls back to `default` then 0.08. */
+  clusterBoostTheta?: Record<string, number>;
 }
 
 export interface NeighborEnrichmentConfig {
@@ -134,6 +139,10 @@ export interface RetrievalResult extends MemorySearchResult {
     reranked?: { score: number };
   };
   neighbors?: RetrievalNeighbor[];
+  /** T048: score snapshot before cluster_boost (for recall_log score_raw). */
+  scoreRaw?: number;
+  /** T048: score snapshot after cluster_boost (for recall_log score_final). */
+  scoreFinal?: number;
 }
 
 export interface RetrievalNeighbor extends MemorySearchResult {
@@ -209,6 +218,37 @@ export interface RetrievalDiagnostics {
 }
 
 // ============================================================================
+// Topic Cluster Provider (T048)
+// ============================================================================
+
+/** Supplies the dynamic active_weight for a topic cluster during scoring. */
+export interface TopicClusterProvider {
+  getActiveWeight(topicId: string, scope: string): Promise<number>;
+}
+
+// ============================================================================
+// T048: recall_log sink (learning signal for weight calibration, Phase 3)
+// ============================================================================
+
+export interface RecallLogEntry {
+  query_id: string;
+  session_key: string;
+  query_text: string;
+  candidate_id: string;
+  topic_id: string | null;
+  score_raw: number;
+  score_final: number;
+  used_in_answer: boolean;
+  user_feedback: number | null;
+  recall_ts: number;
+  metadata: string;
+}
+
+export interface RecallLogSink {
+  logBatch(entries: RecallLogEntry[]): Promise<void>;
+}
+
+// ============================================================================
 // Default Configuration
 // ============================================================================
 
@@ -236,6 +276,8 @@ export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
     enabled: false,
     maxPerResult: 2,
   },
+  clusterBoostEnabled: false,
+  clusterBoostTheta: { global: 0.08, default: 0.08, definitions: 0.08 },
 };
 
 export function normalizeRetrievalConfig(
@@ -618,6 +660,39 @@ export class MemoryRetriever {
     this._statsCollector = collector;
   }
 
+  /** T048: provider supplying per-topic active_weight for cluster_boost. */
+  topicClusterProvider: TopicClusterProvider | null = null;
+
+  /** T048-9: injected boost strategy (OCP). Falls back to a default built from topicClusterProvider. */
+  scoreBoost: ScoreBoost | null = null;
+
+  /** T048: sink for recall_log rows (one per returned candidate). Optional. */
+  recallLogSink: RecallLogSink | null = null;
+
+  /**
+   * T048: topic-cluster boost. Adds `theta * active_weight(topicId)` to each
+   * candidate score, immediately after rerank and before recency/decay/diversity.
+   * Flag-gated (clusterBoostEnabled, default false) and per-scope theta.
+   */
+  async applyClusterBoost(candidates: RetrievalResult[]): Promise<RetrievalResult[]> {
+    // Snapshot pre/post scores for recall_log (§4: score_raw vs score_final).
+    for (const candidate of candidates) {
+      candidate.scoreRaw = candidate.score;
+      candidate.scoreFinal = candidate.score;
+    }
+    if (!this.config.clusterBoostEnabled) return candidates;
+    // T048-9 (DIP/OCP): depend on the ScoreBoost abstraction. Use the injected
+    // strategy, or build a default one from the legacy topicClusterProvider.
+    const strategy =
+      this.scoreBoost ??
+      (this.topicClusterProvider ? new ClusterBoostStrategy(this.topicClusterProvider, 0.08) : null);
+    if (!strategy) return candidates;
+    return strategy.boost(candidates, {
+      clusterBoostEnabled: this.config.clusterBoostEnabled,
+      clusterBoostTheta: this.config.clusterBoostTheta || { default: 0.08 },
+    });
+  }
+
   /** Get the stats collector (if set). */
   getStatsCollector(): RetrievalStatsCollector | null {
     return this._statsCollector;
@@ -733,6 +808,32 @@ export class MemoryRetriever {
         this.accessTracker.recordAccess(results.map((r) => r.entry.id));
       }
 
+      if (this.recallLogSink) {
+        const sessionKey = context.source ?? "global";
+        const logEntries: RecallLogEntry[] = results.map((r, idx) => {
+          const meta = parseSmartMetadata(r.entry.metadata, r.entry) as Record<string, unknown>;
+          const topicId = typeof meta?.parent_topic_id === "string" ? meta.parent_topic_id : null;
+          // T048-HOST: track returned candidates per session for post-hoc used_in_answer.
+          const candText = typeof r.entry.text === "string" ? r.entry.text : "";
+          this.store.trackCandidate(sessionKey, r.entry.id, candText);
+          return {
+            query_id: `${sessionKey}::${Date.now()}::${r.entry.id}`,
+            session_key: sessionKey,
+            query_text: context.query,
+            candidate_id: r.entry.id,
+            topic_id: topicId,
+            score_raw: typeof r.scoreRaw === "number" ? r.scoreRaw : r.score,
+            score_final: typeof r.scoreFinal === "number" ? r.scoreFinal : r.score,
+            used_in_answer: false,
+            user_feedback: null,
+            recall_ts: Date.now(),
+            metadata: JSON.stringify({ rank: idx + 1 }),
+          };
+        });
+        // Fire-and-forget, non-fatal: logging must never break retrieval.
+        void this.recallLogSink.logBatch(logEntries).catch(() => undefined);
+      }
+
       return results;
     } catch (error) {
       diagnostics.finalResultCount = 0;
@@ -840,7 +941,7 @@ export class MemoryRetriever {
         diagnostics.stageCounts.rerankInput = unexpired.length;
       }
 
-      const mapped = unexpired.map(
+      let mapped = unexpired.map(
         (result, index) =>
           ({
             ...result,
@@ -849,6 +950,7 @@ export class MemoryRetriever {
             },
           }) as RetrievalResult,
       );
+      mapped = await this.applyClusterBoost(mapped);
 
       failureStage = "vector.postProcess";
       // Bug 7 fix: when decayEngine is active, skip applyRecencyBoost here because
@@ -918,13 +1020,14 @@ export class MemoryRetriever {
       const metadata = parseSmartMetadata(r.entry.metadata, r.entry);
       return !isMemoryExpired(metadata);
     });
-    const mapped = unexpiredResults.map(
+    let mapped = unexpiredResults.map(
       (result, index) =>
         ({
           ...result,
           sources: { bm25: { score: result.score, rank: index + 1 } },
         }) as RetrievalResult,
     );
+    mapped = await this.applyClusterBoost(mapped);
     trace?.endStage(mapped.map((r) => r.entry.id), mapped.map((r) => r.score));
     if (diagnostics) {
       diagnostics.bm25Query = query;
@@ -1122,6 +1225,7 @@ export class MemoryRetriever {
         reranked = filtered;
       }
       if (diagnostics) diagnostics.stageCounts.afterRerank = reranked.length;
+      reranked = await this.applyClusterBoost(reranked);
 
       let temporallyRanked: RetrievalResult[];
       failureStage = "hybrid.postProcess";
@@ -2019,8 +2123,17 @@ export function createRetriever(
   store: MemoryStore,
   embedder: Embedder,
   config?: RetrievalConfigInput,
-  options?: { decayEngine?: DecayEngine | null },
+  options?: {
+    decayEngine?: DecayEngine | null;
+    topicClusterProvider?: TopicClusterProvider | null;
+    recallLogSink?: RecallLogSink | null;
+    scoreBoost?: ScoreBoost | null;
+  },
 ): MemoryRetriever {
   const fullConfig = normalizeRetrievalConfig(config);
-  return new MemoryRetriever(store, embedder, fullConfig, options?.decayEngine ?? null);
+  const retriever = new MemoryRetriever(store, embedder, fullConfig, options?.decayEngine ?? null);
+  if (options?.topicClusterProvider) retriever.topicClusterProvider = options.topicClusterProvider;
+  if (options?.recallLogSink) retriever.recallLogSink = options.recallLogSink;
+  if (options?.scoreBoost) retriever.scoreBoost = options.scoreBoost;
+  return retriever;
 }

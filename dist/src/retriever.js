@@ -8,6 +8,7 @@ import { expandQuery } from "./query-expander.js";
 import { getDecayableFromEntry, isMemoryExpired, parseSmartMetadata, toLifecycleMemory, } from "./smart-metadata.js";
 import { matchesMemoryCategoryFilter } from "./memory-categories.js";
 import { TraceCollector } from "./retrieval-trace.js";
+import { ClusterBoostStrategy } from "./cluster-boost.js";
 // ============================================================================
 // Default Configuration
 // ============================================================================
@@ -35,6 +36,8 @@ export const DEFAULT_RETRIEVAL_CONFIG = {
         enabled: false,
         maxPerResult: 2,
     },
+    clusterBoostEnabled: false,
+    clusterBoostTheta: { global: 0.08, default: 0.08, definitions: 0.08 },
 };
 export function normalizeRetrievalConfig(config) {
     const neighborEnrichment = {
@@ -344,6 +347,36 @@ export class MemoryRetriever {
     setStatsCollector(collector) {
         this._statsCollector = collector;
     }
+    /** T048: provider supplying per-topic active_weight for cluster_boost. */
+    topicClusterProvider = null;
+    /** T048-9: injected boost strategy (OCP). Falls back to a default built from topicClusterProvider. */
+    scoreBoost = null;
+    /** T048: sink for recall_log rows (one per returned candidate). Optional. */
+    recallLogSink = null;
+    /**
+     * T048: topic-cluster boost. Adds `theta * active_weight(topicId)` to each
+     * candidate score, immediately after rerank and before recency/decay/diversity.
+     * Flag-gated (clusterBoostEnabled, default false) and per-scope theta.
+     */
+    async applyClusterBoost(candidates) {
+        // Snapshot pre/post scores for recall_log (§4: score_raw vs score_final).
+        for (const candidate of candidates) {
+            candidate.scoreRaw = candidate.score;
+            candidate.scoreFinal = candidate.score;
+        }
+        if (!this.config.clusterBoostEnabled)
+            return candidates;
+        // T048-9 (DIP/OCP): depend on the ScoreBoost abstraction. Use the injected
+        // strategy, or build a default one from the legacy topicClusterProvider.
+        const strategy = this.scoreBoost ??
+            (this.topicClusterProvider ? new ClusterBoostStrategy(this.topicClusterProvider, 0.08) : null);
+        if (!strategy)
+            return candidates;
+        return strategy.boost(candidates, {
+            clusterBoostEnabled: this.config.clusterBoostEnabled,
+            clusterBoostTheta: this.config.clusterBoostTheta || { default: 0.08 },
+        });
+    }
     /** Get the stats collector (if set). */
     getStatsCollector() {
         return this._statsCollector;
@@ -423,6 +456,31 @@ export class MemoryRetriever {
             if (this.accessTracker && source === "manual" && results.length > 0) {
                 this.accessTracker.recordAccess(results.map((r) => r.entry.id));
             }
+            if (this.recallLogSink) {
+                const sessionKey = context.source ?? "global";
+                const logEntries = results.map((r, idx) => {
+                    const meta = parseSmartMetadata(r.entry.metadata, r.entry);
+                    const topicId = typeof meta?.parent_topic_id === "string" ? meta.parent_topic_id : null;
+                    // T048-HOST: track returned candidates per session for post-hoc used_in_answer.
+                    const candText = typeof r.entry.text === "string" ? r.entry.text : "";
+                    this.store.trackCandidate(sessionKey, r.entry.id, candText);
+                    return {
+                        query_id: `${sessionKey}::${Date.now()}::${r.entry.id}`,
+                        session_key: sessionKey,
+                        query_text: context.query,
+                        candidate_id: r.entry.id,
+                        topic_id: topicId,
+                        score_raw: typeof r.scoreRaw === "number" ? r.scoreRaw : r.score,
+                        score_final: typeof r.scoreFinal === "number" ? r.scoreFinal : r.score,
+                        used_in_answer: false,
+                        user_feedback: null,
+                        recall_ts: Date.now(),
+                        metadata: JSON.stringify({ rank: idx + 1 }),
+                    };
+                });
+                // Fire-and-forget, non-fatal: logging must never break retrieval.
+                void this.recallLogSink.logBatch(logEntries).catch(() => undefined);
+            }
             return results;
         }
         catch (error) {
@@ -499,12 +557,13 @@ export class MemoryRetriever {
                 diagnostics.stageCounts.afterMinScore = unexpired.length;
                 diagnostics.stageCounts.rerankInput = unexpired.length;
             }
-            const mapped = unexpired.map((result, index) => ({
+            let mapped = unexpired.map((result, index) => ({
                 ...result,
                 sources: {
                     vector: { score: result.score, rank: index + 1 },
                 },
             }));
+            mapped = await this.applyClusterBoost(mapped);
             failureStage = "vector.postProcess";
             // Bug 7 fix: when decayEngine is active, skip applyRecencyBoost here because
             // decayEngine already handles temporal scoring; avoid double-boost.
@@ -564,10 +623,11 @@ export class MemoryRetriever {
             const metadata = parseSmartMetadata(r.entry.metadata, r.entry);
             return !isMemoryExpired(metadata);
         });
-        const mapped = unexpiredResults.map((result, index) => ({
+        let mapped = unexpiredResults.map((result, index) => ({
             ...result,
             sources: { bm25: { score: result.score, rank: index + 1 } },
         }));
+        mapped = await this.applyClusterBoost(mapped);
         trace?.endStage(mapped.map((r) => r.entry.id), mapped.map((r) => r.score));
         if (diagnostics) {
             diagnostics.bm25Query = query;
@@ -730,6 +790,7 @@ export class MemoryRetriever {
             }
             if (diagnostics)
                 diagnostics.stageCounts.afterRerank = reranked.length;
+            reranked = await this.applyClusterBoost(reranked);
             let temporallyRanked;
             failureStage = "hybrid.postProcess";
             if (this.decayEngine) {
@@ -1448,5 +1509,12 @@ export class MemoryRetriever {
 }
 export function createRetriever(store, embedder, config, options) {
     const fullConfig = normalizeRetrievalConfig(config);
-    return new MemoryRetriever(store, embedder, fullConfig, options?.decayEngine ?? null);
+    const retriever = new MemoryRetriever(store, embedder, fullConfig, options?.decayEngine ?? null);
+    if (options?.topicClusterProvider)
+        retriever.topicClusterProvider = options.topicClusterProvider;
+    if (options?.recallLogSink)
+        retriever.recallLogSink = options.recallLogSink;
+    if (options?.scoreBoost)
+        retriever.scoreBoost = options.scoreBoost;
+    return retriever;
 }
