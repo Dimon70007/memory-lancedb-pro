@@ -128,3 +128,49 @@ describe("sessionStrategy legacy compatibility mapping", () => {
     assert.equal(parsed.embedding.chunking, false);
   });
 });
+
+describe("llm.fallbacks config", () => {
+  it("preserves llm.fallbacks string list and drops invalid entries", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary-model",
+        fallbacks: ["litellm/gemma4-26b-a4b", "", 42, "openrouter/other", "primary-model"],
+      },
+    });
+    assert.deepEqual(parsed.llm?.fallbacks, ["litellm/gemma4-26b-a4b", "openrouter/other"]);
+  });
+
+  it("omits llm.fallbacks when the field is not an array", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary-model",
+        fallbacks: "litellm/oops",
+      },
+    });
+    assert.equal(parsed.llm?.fallbacks, undefined);
+  });
+
+  it("keeps an explicit empty llm.fallbacks array", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary-model",
+        fallbacks: [],
+      },
+    });
+    assert.deepEqual(parsed.llm?.fallbacks, []);
+  });
+
+  it("dedupes and trims llm.fallbacks while preserving order", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary",
+        fallbacks: ["  b  ", "a", "b", "a", "primary", "c"],
+      },
+    });
+    assert.deepEqual(parsed.llm?.fallbacks, ["b", "a", "c"]);
+  });
+});

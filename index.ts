@@ -80,7 +80,7 @@ import { normalizeAutoCaptureText } from "./src/auto-capture-cleanup.js";
 import { SmartExtractor, createExtractionRateLimiter } from "./src/smart-extractor.js";
 import { compressTexts, estimateConversationValue } from "./src/session-compressor.js";
 import { NoisePrototypeBank } from "./src/noise-prototypes.js";
-import { createLlmClient } from "./src/llm-client.js";
+import { createLlmClient, resolveLlmFallbacks } from "./src/llm-client.js";
 import { createDecayEngine, DEFAULT_DECAY_CONFIG } from "./src/decay-engine.js";
 import { createTierManager, DEFAULT_TIER_CONFIG } from "./src/tier-manager.js";
 import { createMemoryUpgrader } from "./src/memory-upgrader.js";
@@ -256,6 +256,8 @@ interface PluginConfig {
     auth?: "api-key" | "oauth";
     apiKey?: SecretCredential;
     model?: string;
+    /** Secondary models tried by smart-extraction when primary fails. */
+    fallbacks?: string[];
     baseURL?: string;
     oauthProvider?: string;
     oauthPath?: string;
@@ -2461,11 +2463,13 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
         : undefined;
       const llmOauthProvider = llmAuth === "oauth" ? config.llm?.oauthProvider : undefined;
       const llmTimeoutMs = resolveLlmTimeoutMs(config);
+      const llmFallbacks = resolveLlmFallbacks(config.llm, api.config);
 
       const llmClient = createLlmClient({
         auth: llmAuth,
         apiKey: llmApiKey,
         model: llmModel,
+        fallbacks: llmFallbacks,
         baseURL: llmBaseURL,
         oauthProvider: llmOauthProvider,
         oauthPath: llmOauthPath,
@@ -3223,6 +3227,7 @@ const memoryLanceDBProPlugin = {
               auth: llmAuth,
               apiKey: llmApiKey,
               model: config.llm?.model || "openai/gpt-oss-120b",
+              fallbacks: resolveLlmFallbacks(config.llm, api.config),
               baseURL: llmBaseURL,
               oauthProvider: llmOauthProvider,
               oauthPath: llmOauthPath,
@@ -5917,6 +5922,20 @@ export function parsePluginConfig(value: unknown): PluginConfig {
         const llm = { ...llmRaw };
         if (llm.apiKey !== undefined && !isSecretCredential(llm.apiKey)) {
           throw new Error("llm.apiKey must be a non-empty string or SecretRef with source env/file");
+        }
+        const primary = typeof llm.model === "string" ? llm.model.trim() : "";
+        if (Array.isArray(llm.fallbacks)) {
+          const seen = new Set<string>();
+          llm.fallbacks = llm.fallbacks
+            .filter((item: unknown): item is string => typeof item === "string")
+            .map((item: string) => item.trim())
+            .filter((item: string) => {
+              if (!item || item === primary || seen.has(item)) return false;
+              seen.add(item);
+              return true;
+            });
+        } else {
+          delete llm.fallbacks;
         }
         return llm as any;
       })()

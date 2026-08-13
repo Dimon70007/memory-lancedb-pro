@@ -1560,6 +1560,14 @@
             "type": "string",
             "default": "openai/gpt-oss-120b"
           },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Ordered secondary models for smart-extraction when llm.model fails. If omitted, inherits agents.defaults.model.fallbacks. Set [] to disable inheritance."
+          },
           "baseURL": {
             "type": "string"
           },
@@ -1884,6 +1892,11 @@
       "label": "LLM Model",
       "placeholder": "openai/gpt-oss-120b",
       "help": "OpenAI-compatible chat model for memory extraction/summary"
+    },
+    "llm.fallbacks": {
+      "label": "LLM Fallback Models",
+      "help": "Ordered secondary models tried when the primary extraction model fails. If omitted, inherits agents.defaults.model.fallbacks. Set an empty list to disable inheritance.",
+      "advanced": true
     },
     "llm.baseURL": {
       "label": "LLM Base URL",
