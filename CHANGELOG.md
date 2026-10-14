@@ -9,12 +9,15 @@
 
 ## Unreleased
 
-### Fork (Dimon70007/memory-lancedb-pro, branch `fork-timeoutms`) — custom changes
+### Fork (Dimon70007/memory-lancedb-pro, branch `fork-timeoutms-fixed`) — custom changes
 
 Divergence point from upstream (`CortexReach/memory-lancedb-pro`): `2f2be72`.
 These are the changes carried by this local fork. See `FORK.md` for the full
 fork policy and restore procedure.
 
+- **chore: bump to `1.1.0-beta.12`** — version bump so OpenClaw git installs do
+  not reuse a stale cached `1.1.0-beta.11` tree; declare `memory_feedback` in
+  `contracts.tools` (required by `openclaw plugins doctor`).
 - **feat: `llm.fallbacks` for smart-extraction model failover** — when the primary
   extraction model fails (transport error, empty content, non-JSON / parse
   failure), the LLM client tries ordered secondary models. Priority: explicit
