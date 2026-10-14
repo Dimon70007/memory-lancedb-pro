@@ -128,3 +128,70 @@ describe("sessionStrategy legacy compatibility mapping", () => {
     assert.equal(parsed.embedding.chunking, false);
   });
 });
+
+describe("llm.fallbacks config", () => {
+  it("preserves llm.fallbacks string list and drops invalid entries", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary-model",
+        fallbacks: ["litellm/gemma4-26b-a4b", "", 42, "openrouter/other", "primary-model"],
+      },
+    });
+    assert.deepEqual(parsed.llm?.fallbacks, ["litellm/gemma4-26b-a4b", "openrouter/other"]);
+  });
+
+  it("omits llm.fallbacks when the field is not an array", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary-model",
+        fallbacks: "litellm/oops",
+      },
+    });
+    assert.equal(parsed.llm?.fallbacks, undefined);
+  });
+
+  it("keeps an explicit empty llm.fallbacks array", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary-model",
+        fallbacks: [],
+      },
+    });
+    assert.deepEqual(parsed.llm?.fallbacks, []);
+  });
+
+  it("dedupes and trims llm.fallbacks while preserving order", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary",
+        fallbacks: ["  b  ", "a", "b", "a", "primary", "c"],
+      },
+    });
+    assert.deepEqual(parsed.llm?.fallbacks, ["b", "a", "c"]);
+  });
+
+  it("drops null/object entries and keeps an empty array when nothing valid remains", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary",
+        fallbacks: [null, { model: "x" }, undefined, 3.14],
+      },
+    });
+    assert.deepEqual(parsed.llm?.fallbacks, []);
+  });
+
+  it("does not invent llm.fallbacks when the field is omitted", () => {
+    const parsed = parsePluginConfig({
+      ...baseConfig(),
+      llm: {
+        model: "primary-model",
+      },
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(parsed.llm ?? {}, "fallbacks"), false);
+  });
+});

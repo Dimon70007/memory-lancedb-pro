@@ -455,6 +455,7 @@ Query → BM25 FTS ─────┘
   "llm": {
     "apiKey": "${OPENAI_API_KEY}",
     "model": "gpt-4o-mini",
+    "fallbacks": ["gpt-4.1-mini"],
     "baseURL": "https://api.openai.com/v1"
   },
   "extractMinMessages": 2,
@@ -506,6 +507,7 @@ Query → BM25 FTS ─────┘
 | `llm.auth` | string | `api-key` | `api-key` использует `llm.apiKey` / `embedding.apiKey`; `oauth` по умолчанию использует OAuth-файл токена в области плагина |
 | `llm.apiKey` | string | *(по умолчанию берется из `embedding.apiKey`)* | API-ключ провайдера LLM |
 | `llm.model` | string | `openai/gpt-oss-120b` | Имя модели LLM |
+| `llm.fallbacks` | string[] | *(наследует `agents.defaults.model.fallbacks`)* | Упорядоченный список запасных моделей при сбое `llm.model` (транспорт / пустой ответ / не-JSON). `[]` отключает наследование. Работает для `api-key` и `oauth`. |
 | `llm.baseURL` | string | *(по умолчанию берется из `embedding.baseURL`)* | URL LLM API |
 | `llm.oauthProvider` | string | `openai-codex` | Идентификатор OAuth-провайдера, используемый при `llm.auth = "oauth"` |
 | `llm.oauthPath` | string | `~/.openclaw/.memory-lancedb-pro/oauth.json` | Путь к OAuth-файлу токена при `llm.auth = "oauth"` |
@@ -513,6 +515,12 @@ Query → BM25 FTS ─────┘
 | `extractMinMessages` | number | `2` | Минимум сообщений до срабатывания извлечения |
 | `extractMaxChars` | number | `8000` | Максимум символов, отправляемых в LLM |
 
+Failover моделей (`llm.fallbacks`):
+
+- Если в конфиге плагина задан `llm.fallbacks` (включая `[]`) — используется он.
+- Если поле опущено — наследуется `agents.defaults.model.fallbacks` из глобального конфига OpenClaw.
+- При сбое primary smart extraction по очереди пробует fallbacks (тот же prompt, те же credentials / OAuth-сессия).
+- Дубликаты (и OAuth-алиасы `openai/` / `openai-codex/` одной модели) пропускаются.
 
 OAuth `llm` config (использует существующий кэш логина Codex / ChatGPT для LLM-запросов):
 ```json
@@ -521,6 +529,7 @@ OAuth `llm` config (использует существующий кэш лог�
     "auth": "oauth",
     "oauthProvider": "openai-codex",
     "model": "gpt-5.4",
+    "fallbacks": ["gpt-5.4-mini"],
     "oauthPath": "${HOME}/.openclaw/.memory-lancedb-pro/oauth.json",
     "timeoutMs": 30000
   }

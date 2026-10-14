@@ -96,6 +96,24 @@ assert.ok(
   Object.prototype.hasOwnProperty.call(manifest.configSchema.properties.llm.properties, "oauthProvider"),
   "configSchema should declare llm.oauthProvider",
 );
+assert.ok(
+  Object.prototype.hasOwnProperty.call(manifest.configSchema.properties.llm.properties, "fallbacks"),
+  "configSchema should declare llm.fallbacks for smart-extraction model failover",
+);
+assert.equal(
+  manifest.configSchema.properties.llm.properties.fallbacks.type,
+  "array",
+  "llm.fallbacks should be an array of model ids",
+);
+assert.equal(
+  manifest.configSchema.properties.llm.properties.fallbacks.items?.type,
+  "string",
+  "llm.fallbacks items should be strings",
+);
+assert.ok(
+  Object.prototype.hasOwnProperty.call(manifest.uiHints, "llm.fallbacks"),
+  "uiHints should expose llm.fallbacks so operators can see the setting in OpenClaw UI",
+);
 
 assert.equal(
   manifest.configSchema.properties.autoRecallMinRepeated.default,

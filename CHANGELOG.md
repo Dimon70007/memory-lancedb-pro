@@ -15,6 +15,14 @@ Divergence point from upstream (`CortexReach/memory-lancedb-pro`): `2f2be72`.
 These are the changes carried by this local fork. See `FORK.md` for the full
 fork policy and restore procedure.
 
+- **feat: `llm.fallbacks` for smart-extraction model failover** — when the primary
+  extraction model fails (transport error, empty content, non-JSON / parse
+  failure), the LLM client tries ordered secondary models. Priority: explicit
+  plugin `llm.fallbacks` (including `[]` to disable inheritance) >
+  `agents.defaults.model.fallbacks` from the global OpenClaw config. Supported
+  for both `api-key` and `oauth` clients; OAuth dedupes `openai/` /
+  `openai-codex/` aliases of the same backend model. Schema + `uiHints` declare
+  `llm.fallbacks` in `openclaw.plugin.json`.
 - **fix (timeoutms): portable session file path** — `src/reflection-store.ts`
   now builds the kludgey-file-index session path from `${homedir()}/.openclaw/...`
   instead of a hardcoded `/home/clawbox/.openclaw/...`, so the plugin works on

@@ -523,6 +523,7 @@ For `source: "file"`, `id` is resolved through OpenClaw's `api.resolvePath()` an
   "llm": {
     "apiKey": "${OPENAI_API_KEY}",
     "model": "gpt-4o-mini",
+    "fallbacks": ["gpt-4.1-mini"],
     "baseURL": "https://api.openai.com/v1"
   },
   "extractMinMessages": 2,
@@ -598,6 +599,7 @@ When `smartExtraction` is enabled (default: `true`), the plugin uses an LLM to i
 | `llm.auth` | string | `api-key` | `api-key` uses `llm.apiKey` / `embedding.apiKey`; `oauth` uses a plugin-scoped OAuth token file by default |
 | `llm.apiKey` | string | *(falls back to `embedding.apiKey`)* | API key for the LLM provider |
 | `llm.model` | string | `openai/gpt-oss-120b` | LLM model name |
+| `llm.fallbacks` | string[] | *(inherits `agents.defaults.model.fallbacks`)* | Ordered secondary models tried when `llm.model` fails (transport / empty / non-JSON). Set `[]` to disable inheritance. Works for both `api-key` and `oauth`. |
 | `llm.baseURL` | string | *(falls back to `embedding.baseURL`)* | LLM API endpoint |
 | `llm.oauthProvider` | string | `openai-codex` | OAuth provider id used when `llm.auth` is `oauth` |
 | `llm.oauthPath` | string | `~/.openclaw/.memory-lancedb-pro/oauth.json` | OAuth token file used when `llm.auth` is `oauth` |
@@ -605,6 +607,12 @@ When `smartExtraction` is enabled (default: `true`), the plugin uses an LLM to i
 | `extractMinMessages` | number | `2` | Minimum messages before extraction triggers |
 | `extractMaxChars` | number | `8000` | Maximum characters sent to the LLM |
 
+Model failover (`llm.fallbacks`):
+
+- If `llm.fallbacks` is set on the plugin (including `[]`), that list is used.
+- If omitted, the plugin inherits `agents.defaults.model.fallbacks` from the global OpenClaw config.
+- On primary failure, smart extraction tries each fallback in order (same prompt, same credentials / OAuth session).
+- Duplicate ids (and OAuth `openai/` / `openai-codex/` aliases of the same model) are skipped.
 
 OAuth `llm` config (use existing Codex / ChatGPT login cache for LLM calls):
 ```json
@@ -613,6 +621,7 @@ OAuth `llm` config (use existing Codex / ChatGPT login cache for LLM calls):
     "auth": "oauth",
     "oauthProvider": "openai-codex",
     "model": "gpt-5.4",
+    "fallbacks": ["gpt-5.4-mini"],
     "oauthPath": "${HOME}/.openclaw/.memory-lancedb-pro/oauth.json",
     "timeoutMs": 30000
   }
