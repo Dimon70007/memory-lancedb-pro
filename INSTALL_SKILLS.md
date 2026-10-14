@@ -53,9 +53,10 @@ In the live OpenClaw config (`~/.openclaw/openclaw.json` or your deploy copy):
     "load": {
       "paths": ["<workspace>/skills"]
     },
-    "allow": ["memory-lancedb-pro"],
+    "allow": ["memory-lancedb-pro", "memory-compaction-redistill"],
     "slots": {
-      "memory": "memory-lancedb-pro"
+      "memory": "memory-lancedb-pro",
+      "contextEngine": "memory-compaction-redistill"
     },
     "entries": {
       "memory-lancedb-pro": {
