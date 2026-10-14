@@ -26,6 +26,11 @@ A LanceDB-backed OpenClaw memory plugin that stores preferences, decisions, and 
 
 </div>
 
+> **Path-load (recommended for this fork):** install into the agent workspace
+> `skills/` directory — see **[INSTALL_SKILLS.md](INSTALL_SKILLS.md)** and
+> **[FORK.md](FORK.md)**. Prefer that over managed `openclaw plugins install git:…`
+> so companion plugins can use sibling paths under `skills/`.
+
 ---
 
 ## Why memory-lancedb-pro?
