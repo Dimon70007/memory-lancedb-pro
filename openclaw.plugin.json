@@ -2427,6 +2427,7 @@
       "memory_get",
       "memory_fact_query",
       "memory_store",
+      "memory_feedback",
       "memory_update",
       "memory_forget",
       "memory_list",
